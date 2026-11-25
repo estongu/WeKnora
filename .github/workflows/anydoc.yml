@@ -10,12 +10,14 @@ on:
     paths:
       - "third_party/anydoc-go/**"
       - "scripts/build-anydoc-lib.sh"
+      - "scripts/test-anydoc-lto.sh"
       - "internal/infrastructure/docparser/**"
       - ".github/workflows/anydoc.yml"
   pull_request:
     paths:
       - "third_party/anydoc-go/**"
       - "scripts/build-anydoc-lib.sh"
+      - "scripts/test-anydoc-lto.sh"
       - "internal/infrastructure/docparser/**"
       - ".github/workflows/anydoc.yml"
   workflow_dispatch:
@@ -45,6 +47,9 @@ jobs:
           cache: true
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test LLVM section cleanup and native linking
+        run: bash scripts/test-anydoc-lto.sh
 
       - name: Cache cargo-audit
         id: cargo-audit-cache

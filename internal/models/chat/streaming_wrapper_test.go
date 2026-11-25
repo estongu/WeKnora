@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/models/api"
 	"github.com/Tencent/WeKnora/internal/types"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/stretchr/testify/require"
@@ -21,6 +22,12 @@ type streamStub struct {
 	err    error
 	stall  bool
 }
+
+// GetModelName 返回用于日志断言的固定模型名。
+func (s *streamStub) GetModelName() string { return "test-model" }
+
+// GetModelID 返回用于日志断言的固定模型 ID。
+func (s *streamStub) GetModelID() string { return "test-id" }
 
 // ChatStream 接收原始调用参数，返回预设事件或错误；stall 模拟等待取消的上游。
 func (s *streamStub) ChatStream(ctx context.Context, _ []Message, _ *ChatOptions) (<-chan types.StreamResponse, error) {
@@ -143,4 +150,34 @@ func TestStreamingFactoryScope(t *testing.T) {
 			require.Equal(t, modelType == types.ModelTypeKnowledgeQA, streaming)
 		})
 	}
+}
+
+// TestStreamingRejectionDetails 模拟企业网关返回 403，验证真实请求仍为 stream=true，
+// 返回错误包含模型、用途、阶段、HTTP 状态码和网关原文，且保留可解包的 HTTPError。
+func TestStreamingRejectionDetails(t *testing.T) {
+	const rejection = `{"error":{"message":"Non-streaming requests are disabled by company policy"}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Equal(t, true, body["stream"])
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(rejection))
+	}))
+	defer server.Close()
+	t.Setenv("SSRF_WHITELIST", "127.0.0.1")
+	secutils.ResetSSRFWhitelistForTest()
+	t.Cleanup(secutils.ResetSSRFWhitelistForTest)
+	model, err := NewChat(&ChatConfig{ModelType: types.ModelTypeKnowledgeQA, Source: types.ModelSourceRemote, Provider: "generic", BaseURL: server.URL + "/v1", ModelName: "company-model", ModelID: "company-id", APIKey: "test"}, nil)
+	require.NoError(t, err)
+	ctx := types.WithLLMCallMetadata(context.Background(), "wiki_test", "")
+	result, err := model.Chat(ctx, []Message{{Role: "user", Content: "hi"}}, nil)
+	require.Nil(t, result)
+	require.Error(t, err)
+	for _, detail := range []string{"company-id", "company-model", "wiki_test", "stream=true", "stage=start_stream", "403", "Non-streaming requests are disabled by company policy"} {
+		require.Contains(t, err.Error(), detail)
+	}
+	var httpErr *api.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusForbidden, httpErr.StatusCode)
+	require.Equal(t, rejection, httpErr.Body)
 }

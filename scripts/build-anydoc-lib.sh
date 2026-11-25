@@ -112,9 +112,42 @@ prepare_patched_anydoc
 # resolver drift must fail the build rather than ship an unaudited tree.
 cargo build --release --locked --manifest-path "$crate_dir/Cargo.toml" --target "$target"
 
+# strip_llvm_lto_sections 接收 Linux 静态库路径，移除 Rust 嵌入的 LLVM 元数据。
+# Go 的 cgo 校验会拒绝这些段；关闭当前 crate 的 LTO 也不会清理预编译标准库中的段。
+# 此处只清理最终副本，不修改 Cargo 缓存。清理失败立即终止，保留明确的构建日志。
+strip_llvm_lto_sections() {
+  local lib="$1"
+  local listing sections section
+  for tool in readelf objcopy; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "error: $tool is required to remove LLVM sections from $lib (install binutils)." >&2
+      return 1
+    fi
+  done
+  listing=$(readelf -SW "$lib") || return 1
+  sections=$(printf '%s\n' "$listing" | grep -oE '\.llvm[a-zA-Z0-9_.]*' | sort -u || true)
+  [ -n "$sections" ] || return 0
+  while IFS= read -r section; do
+    echo "Removing LLVM section $section from $lib"
+    if ! objcopy --remove-section="$section" "$lib"; then
+      echo "error: could not remove $section from $lib" >&2
+      return 1
+    fi
+  done <<< "$sections"
+  listing=$(readelf -SW "$lib") || return 1
+  if printf '%s\n' "$listing" | grep -E '\.llvm[a-zA-Z0-9_.]*' >/dev/null; then
+    echo "error: LLVM sections remain in $lib after cleanup" >&2
+    return 1
+  fi
+}
+
 dest="$crate_dir/lib/$lib_dir"
 mkdir -p "$dest"
 cp "$crate_dir/target/$target/release/$lib_name" "$dest/$lib_name"
+# readelf/objcopy 用于 ELF；macOS 和 Windows 仍沿用各自原有的构建路径。
+case "$target" in
+  *-linux-*) strip_llvm_lto_sections "$dest/$lib_name" ;;
+esac
 
 echo "Wrote $dest/$lib_name"
 echo "Build WeKnora with the archive: go build -tags anydoc ./cmd/server"
