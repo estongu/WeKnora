@@ -63,7 +63,7 @@ var (
 
 // Chat 定义了聊天接口
 type Chat interface {
-	// Chat 进行非流式聊天
+	// Chat 返回完整聊天结果；对话类型模型在内部通过流式请求汇总结果。
 	Chat(ctx context.Context, messages []Message, opts *ChatOptions) (*types.ChatResponse, error)
 
 	// ChatStream 进行流式聊天
@@ -78,6 +78,8 @@ type Chat interface {
 
 // ChatConfig is the operator-facing configuration of one chat model.
 type ChatConfig struct {
+	// ModelType 用于区分对话模型与独立视觉模型，只有对话模型强制使用流式请求。
+	ModelType types.ModelType
 	Source    types.ModelSource
 	BaseURL   string
 	ModelName string
@@ -105,6 +107,7 @@ func ConfigFromModel(m *types.Model, appID, appSecret string) *ChatConfig {
 		return nil
 	}
 	return &ChatConfig{
+		ModelType:      m.Type,
 		ModelID:        m.ID,
 		APIKey:         m.Parameters.APIKey,
 		BaseURL:        m.Parameters.BaseURL,
@@ -134,6 +137,10 @@ func NewChat(config *ChatConfig, ollamaService *ollama.OllamaService) (Chat, err
 	}
 	c, err = wrapChatDebug(c, err)
 	c, err = wrapChatLangfuse(c, err)
+	// 对话模型的完整结果调用也走流式传输，业务层仍等待完整结果。
+	if err == nil && c != nil && config.ModelType == types.ModelTypeKnowledgeQA {
+		c = &streamingChat{chatDelegate: c}
+	}
 	// Outermost: hold the per-model concurrency slot only around the real
 	// provider round-trip, so the wait is excluded from debug/langfuse timing.
 	return wrapChatConcurrency(c, config.MaxConcurrency, err)
